@@ -1,7 +1,7 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, screen, crashReporter, } from "electron";
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, screen, crashReporter, globalShortcut, clipboard, } from "electron";
 import { installMacService } from "./mac-service.js";
 import { initCrashLog, teeConsole, installProcessHandlers, logLine, getCrashLogPath, } from "./crash-log.js";
-import { execFile } from "child_process";
+import { execFile, exec } from "child_process";
 import { Worker } from "worker_threads";
 import * as path from "path";
 import * as fs from "fs";
@@ -1074,6 +1074,61 @@ app.whenReady().then(() => {
     createWindow();
     preloadModel();
     startUpdateChecks(() => mainWindow);
+    // Register global hotkey to read selected text
+    globalShortcut.register("CommandOrControl+Alt+Space", () => {
+        console.log("[Hotkey] Pressed Ctrl+Alt+Space");
+        const oldText = clipboard.readText();
+        clipboard.writeText("");
+        if (process.platform === "win32") {
+            const psPath = path.join(app.getPath("userData"), "send_c.ps1");
+            if (!fs.existsSync(psPath)) {
+                fs.writeFileSync(psPath, `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class KeySender {
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    public static void Copy() {
+        keybd_event(0x11, 0, 0, UIntPtr.Zero);
+        keybd_event(0x43, 0, 0, UIntPtr.Zero);
+        keybd_event(0x43, 0, 2, UIntPtr.Zero);
+        keybd_event(0x11, 0, 2, UIntPtr.Zero);
+    }
+}
+"@
+[KeySender]::Copy()
+`.trim());
+            }
+            console.log(`[Hotkey] Executing PowerShell for hardware Ctrl+C`);
+            exec(`powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "${psPath}"`, () => {
+                setTimeout(() => {
+                    const newText = clipboard.readText();
+                    console.log(`[Hotkey] Copied text: ${newText.substring(0, 50)}`);
+                    if (newText) {
+                        mainWindow?.webContents.send("external:speak", { text: newText, source: "service" });
+                    }
+                    else {
+                        console.log("[Hotkey] No new text copied, restoring old text.");
+                        clipboard.writeText(oldText);
+                    }
+                }, 150);
+            });
+        }
+        else if (process.platform === "darwin") {
+            exec(`osascript -e 'tell application "System Events" to keystroke "c" using command down'`, () => {
+                setTimeout(() => {
+                    const newText = clipboard.readText();
+                    if (newText) {
+                        mainWindow?.webContents.send("external:speak", { text: newText, source: "service" });
+                    }
+                    else {
+                        clipboard.writeText(oldText);
+                    }
+                }, 150);
+            });
+        }
+    });
     // macOS only: install the "Read out loud" right-click Services entry, which
     // pipes the selection to the local /api/v1/speak endpoint. Not available in
     // MAS builds (no localhost server there).
