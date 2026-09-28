@@ -7,6 +7,7 @@ const DEFAULT_PREFS = {
     installId: null,
     userName: null,
     userEmail: null,
+    globalShortcut: "Shift+CommandOrControl+Alt+Space",
 };
 let cache = null;
 function prefsPath() {

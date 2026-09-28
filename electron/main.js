@@ -10,6 +10,7 @@ import { fileURLToPath } from "url";
 import WordExtractor from "word-extractor";
 import { startUpdateChecks, stopUpdateChecks, getUpdate, skipVersion } from "./update-check.js";
 import { getRecents, putRecent, removeRecent } from "./reader-recents.js";
+import { getPrefs, setPrefs } from "./store.js";
 import { initTelemetry, track, trackFromRenderer, trackSessionStart, shutdownTelemetry, lengthBucket, getUserIdentity, setUserIdentity, } from "./telemetry.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,9 +216,9 @@ function createWindow() {
     mainWindow.on("closed", () => {
         mainWindow = null;
     });
-    // Hide instead of close on macOS
+    // Hide instead of close on all platforms so tray keeps it alive
     mainWindow.on("close", (event) => {
-        if (process.platform === "darwin" && !isAppQuitting) {
+        if (!isAppQuitting) {
             event.preventDefault();
             mainWindow?.hide();
         }
@@ -1074,15 +1075,17 @@ app.whenReady().then(() => {
     createWindow();
     preloadModel();
     startUpdateChecks(() => mainWindow);
-    // Register global hotkey to read selected text
-    globalShortcut.register("CommandOrControl+Alt+Space", () => {
-        console.log("[Hotkey] Pressed Ctrl+Alt+Space");
-        const oldText = clipboard.readText();
-        clipboard.writeText("");
-        if (process.platform === "win32") {
-            const psPath = path.join(app.getPath("userData"), "send_c.ps1");
-            if (!fs.existsSync(psPath)) {
-                fs.writeFileSync(psPath, `
+    function registerShortcut() {
+        globalShortcut.unregisterAll();
+        const shortcut = getPrefs().globalShortcut || "Shift+CommandOrControl+Alt+Space";
+        globalShortcut.register(shortcut, () => {
+            console.log(`[Hotkey] Pressed ${shortcut}`);
+            const oldText = clipboard.readText();
+            clipboard.writeText("");
+            if (process.platform === "win32") {
+                const psPath = path.join(app.getPath("userData"), "send_c.ps1");
+                if (!fs.existsSync(psPath)) {
+                    fs.writeFileSync(psPath, `
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -1090,45 +1093,60 @@ public class KeySender {
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     public static void Copy() {
-        keybd_event(0x11, 0, 0, UIntPtr.Zero);
-        keybd_event(0x43, 0, 0, UIntPtr.Zero);
-        keybd_event(0x43, 0, 2, UIntPtr.Zero);
-        keybd_event(0x11, 0, 2, UIntPtr.Zero);
+        // Force release modifier keys that the user might be physically holding down
+        keybd_event(0x10, 0, 2, UIntPtr.Zero); // Shift up
+        keybd_event(0x11, 0, 2, UIntPtr.Zero); // Ctrl up
+        keybd_event(0x12, 0, 2, UIntPtr.Zero); // Alt up
+        
+        System.Threading.Thread.Sleep(50); // Give the OS a moment to register the release
+        
+        // Send Ctrl+C
+        keybd_event(0x11, 0, 0, UIntPtr.Zero); // Ctrl down
+        keybd_event(0x43, 0, 0, UIntPtr.Zero); // C down
+        keybd_event(0x43, 0, 2, UIntPtr.Zero); // C up
+        keybd_event(0x11, 0, 2, UIntPtr.Zero); // Ctrl up
     }
 }
 "@
 [KeySender]::Copy()
 `.trim());
+                }
+                console.log(`[Hotkey] Executing PowerShell for hardware Ctrl+C`);
+                exec(`powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "${psPath}"`, () => {
+                    setTimeout(() => {
+                        const newText = clipboard.readText();
+                        console.log(`[Hotkey] Copied text: ${newText.substring(0, 50)}`);
+                        if (newText) {
+                            mainWindow?.webContents.send("external:speak", { text: newText, source: "service" });
+                        }
+                        else {
+                            console.log("[Hotkey] No new text copied, restoring old text.");
+                            clipboard.writeText(oldText);
+                        }
+                    }, 150);
+                });
             }
-            console.log(`[Hotkey] Executing PowerShell for hardware Ctrl+C`);
-            exec(`powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "${psPath}"`, () => {
-                setTimeout(() => {
-                    const newText = clipboard.readText();
-                    console.log(`[Hotkey] Copied text: ${newText.substring(0, 50)}`);
-                    if (newText) {
-                        mainWindow?.webContents.send("external:speak", { text: newText, source: "service" });
-                    }
-                    else {
-                        console.log("[Hotkey] No new text copied, restoring old text.");
-                        clipboard.writeText(oldText);
-                    }
-                }, 150);
-            });
-        }
-        else if (process.platform === "darwin") {
-            exec(`osascript -e 'tell application "System Events" to keystroke "c" using command down'`, () => {
-                setTimeout(() => {
-                    const newText = clipboard.readText();
-                    if (newText) {
-                        mainWindow?.webContents.send("external:speak", { text: newText, source: "service" });
-                    }
-                    else {
-                        clipboard.writeText(oldText);
-                    }
-                }, 150);
-            });
-        }
+            else if (process.platform === "darwin") {
+                exec(`osascript -e 'tell application "System Events" to keystroke "c" using command down'`, () => {
+                    setTimeout(() => {
+                        const newText = clipboard.readText();
+                        if (newText) {
+                            mainWindow?.webContents.send("external:speak", { text: newText, source: "service" });
+                        }
+                        else {
+                            clipboard.writeText(oldText);
+                        }
+                    }, 150);
+                });
+            }
+        }); // End globalShortcut.register
+    } // End registerShortcut
+    registerShortcut();
+    ipcMain.handle("app:setShortcut", (_event, newShortcut) => {
+        setPrefs({ globalShortcut: newShortcut });
+        registerShortcut();
     });
+    ipcMain.handle("app:getShortcut", () => getPrefs().globalShortcut || "Shift+CommandOrControl+Alt+Space");
     // macOS only: install the "Read out loud" right-click Services entry, which
     // pipes the selection to the local /api/v1/speak endpoint. Not available in
     // MAS builds (no localhost server there).

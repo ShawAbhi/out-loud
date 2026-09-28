@@ -21,6 +21,7 @@ export interface AppPrefs {
   // PostHog person properties so the install can be recognised. null = not set.
   userName: string | null;
   userEmail: string | null;
+  globalShortcut: string;
 }
 
 const DEFAULT_PREFS: AppPrefs = {
@@ -29,6 +30,7 @@ const DEFAULT_PREFS: AppPrefs = {
   installId: null,
   userName: null,
   userEmail: null,
+  globalShortcut: "Shift+CommandOrControl+Alt+Space",
 };
 
 let cache: AppPrefs | null = null;
